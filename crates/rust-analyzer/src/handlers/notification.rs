@@ -16,7 +16,7 @@ use vfs::{AbsPathBuf, ChangeKind, VfsPath};
 
 use crate::{
     config::{Config, ConfigChange},
-    flycheck::Target,
+    flycheck::{RestartPackage, Target},
     global_state::{FetchWorkspaceRequest, GlobalState},
     lsp::{from_proto, utils::apply_document_changes},
     lsp_ext::{self, RunFlycheckParams},
@@ -304,48 +304,85 @@ fn run_flycheck(state: &mut GlobalState, vfs_path: VfsPath) -> bool {
         let invocation_strategy_once = state.config.flycheck(None).invocation_strategy_once();
         let may_flycheck_workspace = state.config.flycheck_workspace(None);
         let mut updated = false;
+
+        #[derive(Debug)]
+        enum TargetKind {
+            Cargo {
+                target: Option<Target>,
+                workspace_root: AbsPathBuf,
+                package: String,
+            },
+            Custom {
+                workspace_root: AbsPathBuf,
+                check_runnable: project_model::project_json::Runnable,
+            },
+        }
+
         let task = move || -> std::result::Result<(), Cancelled> {
             if invocation_strategy_once {
                 let saved_file = vfs_path.as_path().map(|p| p.to_owned());
                 world.flycheck[0].restart_workspace(saved_file);
             }
 
-            let target = TargetSpec::for_file(&world, file_id)?.and_then(|it| {
+            let target_kind = TargetSpec::for_file(&world, file_id)?.and_then(|it| {
                 let tgt_kind = it.target_kind();
-                let (tgt_name, root, package) = match it {
-                    TargetSpec::Cargo(c) => (c.target, c.workspace_root, c.package),
-                    _ => return None,
-                };
-
-                let tgt = match tgt_kind {
-                    project_model::TargetKind::Bin => Target::Bin(tgt_name),
-                    project_model::TargetKind::Example => Target::Example(tgt_name),
-                    project_model::TargetKind::Test => Target::Test(tgt_name),
-                    project_model::TargetKind::Bench => Target::Benchmark(tgt_name),
-                    _ => return Some((None, root, package)),
-                };
-
-                Some((Some(tgt), root, package))
+                match it {
+                    TargetSpec::Cargo(c) => {
+                        let target = match tgt_kind {
+                            project_model::TargetKind::Bin => Some(Target::Bin(c.target)),
+                            project_model::TargetKind::Example => Some(Target::Example(c.target)),
+                            project_model::TargetKind::Test => Some(Target::Test(c.target)),
+                            project_model::TargetKind::Bench => Some(Target::Benchmark(c.target)),
+                            _ => None,
+                        };
+                        Some(TargetKind::Cargo {
+                            target,
+                            workspace_root: c.workspace_root,
+                            package: c.package,
+                        })
+                    }
+                    TargetSpec::ProjectJson(p) => Some(TargetKind::Custom {
+                        check_runnable: p.check_runnable()?,
+                        workspace_root: p.workspace_root,
+                    }),
+                }
             });
-            tracing::debug!(?target, "flycheck target");
+            tracing::debug!(?target_kind, "flycheck target");
             // we have a specific non-library target, attempt to only check that target, nothing
             // else will be affected
-            if let Some((target, root, package)) = target {
+            if let Some(target_kind) = target_kind {
                 // trigger a package check if we have a non-library target as that can't affect
                 // anything else in the workspace OR if we're not allowed to check the workspace as
                 // the user opted into package checks then
-                let package_check_allowed = target.is_some() || !may_flycheck_workspace;
+                let package_check_allowed = matches!(
+                    target_kind,
+                    TargetKind::Custom { .. } | TargetKind::Cargo { target: Some(_), .. }
+                ) || !may_flycheck_workspace;
+
                 if package_check_allowed {
+                    let (root, restart_package) = match target_kind {
+                        TargetKind::Cargo { workspace_root, package, target } => {
+                            (workspace_root, RestartPackage::Cargo { package, target })
+                        }
+                        TargetKind::Custom { check_runnable, workspace_root } => {
+                            (workspace_root, RestartPackage::Custom(check_runnable))
+                        }
+                    };
+
                     let workspace = world.workspaces.iter().position(|ws| match &ws.kind {
                         project_model::ProjectWorkspaceKind::Cargo { cargo, .. }
                         | project_model::ProjectWorkspaceKind::DetachedFile {
                             cargo: Some((cargo, _, _)),
                             ..
                         } => *cargo.workspace_root() == root,
+                        project_model::ProjectWorkspaceKind::Json(project) => {
+                            *project.path() == root
+                        }
                         _ => false,
                     });
+
                     if let Some(idx) = workspace {
-                        world.flycheck[idx].restart_for_package(package, target);
+                        world.flycheck[idx].restart_for_package(restart_package);
                     }
                 }
             }

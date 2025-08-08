@@ -140,6 +140,12 @@ pub(crate) struct FlycheckHandle {
     id: usize,
 }
 
+#[derive(Debug)]
+pub(crate) enum RestartPackage {
+    Cargo { package: String, target: Option<Target> },
+    Custom(project_model::project_json::Runnable),
+}
+
 impl FlycheckHandle {
     pub(crate) fn spawn(
         id: usize,
@@ -161,13 +167,13 @@ impl FlycheckHandle {
 
     /// Schedule a re-start of the cargo check worker to do a workspace wide check.
     pub(crate) fn restart_workspace(&self, saved_file: Option<AbsPathBuf>) {
-        self.sender.send(StateChange::Restart { package: None, saved_file, target: None }).unwrap();
+        self.sender.send(StateChange::Restart { package: None, saved_file }).unwrap();
     }
 
     /// Schedule a re-start of the cargo check worker to do a package wide check.
-    pub(crate) fn restart_for_package(&self, package: String, target: Option<Target>) {
+    pub(crate) fn restart_for_package(&self, package: RestartPackage) {
         self.sender
-            .send(StateChange::Restart { package: Some(package), saved_file: None, target })
+            .send(StateChange::Restart { package: Some(package), saved_file: None })
             .unwrap();
     }
 
@@ -237,7 +243,7 @@ pub(crate) enum Progress {
 }
 
 enum StateChange {
-    Restart { package: Option<String>, saved_file: Option<AbsPathBuf>, target: Option<Target> },
+    Restart { saved_file: Option<AbsPathBuf>, package: Option<RestartPackage> },
     Cancel,
 }
 
@@ -327,7 +333,7 @@ impl FlycheckActor {
                     tracing::debug!(flycheck_id = self.id, "flycheck cancelled");
                     self.cancel_check_process();
                 }
-                Event::RequestStateChange(StateChange::Restart { package, saved_file, target }) => {
+                Event::RequestStateChange(StateChange::Restart { package, saved_file }) => {
                     // Cancel the previously spawned process
                     self.cancel_check_process();
                     while let Ok(restart) = inbox.recv_timeout(Duration::from_millis(50)) {
@@ -337,8 +343,7 @@ impl FlycheckActor {
                         }
                     }
 
-                    let Some(command) =
-                        self.check_command(package.as_deref(), saved_file.as_deref(), target)
+                    let Some(command) = self.check_command(package.as_ref(), saved_file.as_deref())
                     else {
                         continue;
                     };
@@ -484,10 +489,25 @@ impl FlycheckActor {
     /// return None.
     fn check_command(
         &self,
-        package: Option<&str>,
+        package: Option<&RestartPackage>,
         saved_file: Option<&AbsPath>,
-        target: Option<Target>,
     ) -> Option<Command> {
+        let (package, target) = match package {
+            Some(RestartPackage::Custom(runnable)) => {
+                let mut cmd = toolchain::command(
+                    &runnable.program,
+                    &runnable.cwd,
+                    &FxHashMap::default(),
+                );
+
+                cmd.args(runnable.args.iter());
+
+                return Some(cmd);
+            }
+            Some(RestartPackage::Cargo { package, target }) => (Some(package), target.as_ref()),
+            None => (None, None),
+        };
+
         match &self.config {
             FlycheckConfig::CargoCommand { command, options, ansi_color_output } => {
                 let mut cmd =
