@@ -149,6 +149,12 @@ pub(crate) struct FlycheckHandle {
     generation: AtomicUsize,
 }
 
+#[derive(Debug)]
+pub(crate) enum RestartPackage {
+    Cargo { package: String, target: Option<Target> },
+    Custom(project_model::project_json::Runnable),
+}
+
 impl FlycheckHandle {
     pub(crate) fn spawn(
         id: usize,
@@ -179,21 +185,14 @@ impl FlycheckHandle {
     /// Schedule a re-start of the cargo check worker to do a workspace wide check.
     pub(crate) fn restart_workspace(&self, saved_file: Option<AbsPathBuf>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.sender
-            .send(StateChange::Restart { generation, package: None, saved_file, target: None })
-            .unwrap();
+        self.sender.send(StateChange::Restart { generation, package: None, saved_file }).unwrap();
     }
 
     /// Schedule a re-start of the cargo check worker to do a package wide check.
-    pub(crate) fn restart_for_package(&self, package: String, target: Option<Target>) {
+    pub(crate) fn restart_for_package(&self, package: RestartPackage) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.sender
-            .send(StateChange::Restart {
-                generation,
-                package: Some(package),
-                saved_file: None,
-                target,
-            })
+            .send(StateChange::Restart { generation, package: Some(package), saved_file: None })
             .unwrap();
     }
 
@@ -278,9 +277,8 @@ pub(crate) enum Progress {
 enum StateChange {
     Restart {
         generation: DiagnosticsGeneration,
-        package: Option<String>,
         saved_file: Option<AbsPathBuf>,
-        target: Option<Target>,
+        package: Option<RestartPackage>,
     },
     Cancel,
 }
@@ -378,7 +376,6 @@ impl FlycheckActor {
                     generation,
                     package,
                     saved_file,
-                    target,
                 }) => {
                     // Cancel the previously spawned process
                     self.cancel_check_process();
@@ -391,8 +388,7 @@ impl FlycheckActor {
 
                     self.generation = generation;
 
-                    let Some(command) =
-                        self.check_command(package.as_deref(), saved_file.as_deref(), target)
+                    let Some(command) = self.check_command(package.as_ref(), saved_file.as_deref())
                     else {
                         continue;
                     };
@@ -548,10 +544,22 @@ impl FlycheckActor {
     /// return None.
     fn check_command(
         &self,
-        package: Option<&str>,
+        package: Option<&RestartPackage>,
         saved_file: Option<&AbsPath>,
-        target: Option<Target>,
     ) -> Option<Command> {
+        let (package, target) = match package {
+            Some(RestartPackage::Custom(runnable)) => {
+                let mut cmd =
+                    toolchain::command(&runnable.program, &runnable.cwd, &FxHashMap::default());
+
+                cmd.args(runnable.args.iter());
+
+                return Some(cmd);
+            }
+            Some(RestartPackage::Cargo { package, target }) => (Some(package), target.as_ref()),
+            None => (None, None),
+        };
+
         match &self.config {
             FlycheckConfig::CargoCommand { command, options, ansi_color_output } => {
                 let mut cmd =

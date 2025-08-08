@@ -796,8 +796,14 @@ impl GlobalStateSnapshot {
 
                     return Some(TargetSpec::ProjectJson(ProjectJsonTargetSpec {
                         label: build.label,
+                        workspace_root: project.path().to_path_buf(),
                         target_kind: build.target_kind,
-                        shell_runnables: project.runnables().to_owned(),
+                        shell_runnables: project
+                            .runnables()
+                            .iter()
+                            .chain(build.runnables.iter())
+                            .map(|r| (r.kind.clone(), r.clone()))
+                            .collect(),
                     }));
                 }
                 ProjectWorkspaceKind::DetachedFile { .. } => {}

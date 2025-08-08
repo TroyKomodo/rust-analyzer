@@ -128,6 +128,7 @@ impl ProjectJson {
                             label: build.label,
                             build_file: build.build_file,
                             target_kind: build.target_kind.into(),
+                            runnables: build.runnables.into_iter().map(Runnable::from).collect(),
                         }),
                         None => None,
                     };
@@ -279,6 +280,10 @@ pub struct Build {
     /// and [`TargetKind::Test`]. This information is used to determine what sort
     /// of runnable codelens to provide, if any.
     pub target_kind: TargetKind,
+    /// Configuration for CLI commands.
+    ///
+    /// Examples include a check build or a test run.
+    pub runnables: Vec<Runnable>,
 }
 
 /// A template-like structure for describing runnables.
@@ -323,7 +328,7 @@ pub struct Runnable {
 }
 
 /// The kind of runnable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RunnableKind {
     Check,
 
@@ -332,6 +337,12 @@ pub enum RunnableKind {
 
     /// Run a single test.
     TestOne,
+
+    /// Runs a test against a module
+    TestMod,
+
+    /// Runs a doc test.
+    DocTest,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -423,6 +434,8 @@ pub struct BuildData {
     label: String,
     build_file: Utf8PathBuf,
     target_kind: TargetKindData,
+    #[serde(default)]
+    runnables: Vec<RunnableData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +452,8 @@ pub enum RunnableKindData {
     Check,
     Run,
     TestOne,
+    TestMod,
+    DocTest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -506,6 +521,8 @@ impl From<RunnableKindData> for RunnableKind {
             RunnableKindData::Check => RunnableKind::Check,
             RunnableKindData::Run => RunnableKind::Run,
             RunnableKindData::TestOne => RunnableKind::TestOne,
+            RunnableKindData::TestMod => RunnableKind::TestMod,
+            RunnableKindData::DocTest => RunnableKind::DocTest,
         }
     }
 }

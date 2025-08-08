@@ -1,5 +1,6 @@
 //! See `TargetSpec`
 
+use std::collections::BTreeMap;
 use std::mem;
 
 use cfg::{CfgAtom, CfgExpr};
@@ -63,8 +64,9 @@ pub(crate) struct CargoTargetSpec {
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectJsonTargetSpec {
     pub(crate) label: String,
+    pub(crate) workspace_root: AbsPathBuf,
     pub(crate) target_kind: TargetKind,
-    pub(crate) shell_runnables: Vec<Runnable>,
+    pub(crate) shell_runnables: BTreeMap<project_model::project_json::RunnableKind, Runnable>,
 }
 
 impl ProjectJsonTargetSpec {
@@ -72,8 +74,7 @@ impl ProjectJsonTargetSpec {
         match kind {
             RunnableKind::Bin => self
                 .shell_runnables
-                .iter()
-                .find(|r| matches!(r.kind, project_model::project_json::RunnableKind::Run))
+                .get(&project_model::project_json::RunnableKind::Run)
                 .cloned()
                 .map(|mut runnable| {
                     runnable.args.iter_mut().for_each(|arg| {
@@ -84,8 +85,7 @@ impl ProjectJsonTargetSpec {
                 }),
             RunnableKind::Test { test_id, .. } => self
                 .shell_runnables
-                .iter()
-                .find(|r| matches!(r.kind, project_model::project_json::RunnableKind::TestOne))
+                .get(&project_model::project_json::RunnableKind::TestOne)
                 .cloned()
                 .map(|mut runnable| {
                     runnable.args.iter_mut().for_each(|arg| {
@@ -96,10 +96,44 @@ impl ProjectJsonTargetSpec {
 
                     runnable
                 }),
-            RunnableKind::TestMod { .. } => None,
+            RunnableKind::TestMod { path } => self
+                .shell_runnables
+                .get(&project_model::project_json::RunnableKind::TestMod)
+                .cloned()
+                .map(|mut runnable| {
+                    runnable.args.iter_mut().for_each(|arg| {
+                        *arg = arg.replace("{label}", &self.label).replace("{path}", path.as_ref());
+                    });
+
+                    runnable
+                }),
             RunnableKind::Bench { .. } => None,
-            RunnableKind::DocTest { .. } => None,
+            RunnableKind::DocTest { test_id } => self
+                .shell_runnables
+                .get(&project_model::project_json::RunnableKind::DocTest)
+                .cloned()
+                .map(|mut runnable| {
+                    runnable.args.iter_mut().for_each(|arg| {
+                        *arg = arg
+                            .replace("{label}", &self.label)
+                            .replace("{test_id}", test_id.as_ref());
+                    });
+
+                    runnable
+                }),
         }
+    }
+
+    pub(crate) fn check_runnable(&self) -> Option<Runnable> {
+        self.shell_runnables.get(&project_model::project_json::RunnableKind::Check).cloned().map(
+            |mut runnable| {
+                runnable.args.iter_mut().for_each(|arg| {
+                    *arg = arg.replace("{label}", &self.label);
+                });
+
+                runnable
+            },
+        )
     }
 }
 
