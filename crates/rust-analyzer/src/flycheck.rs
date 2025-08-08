@@ -494,11 +494,8 @@ impl FlycheckActor {
     ) -> Option<Command> {
         let (package, target) = match package {
             Some(RestartPackage::Custom(runnable)) => {
-                let mut cmd = toolchain::command(
-                    &runnable.program,
-                    &runnable.cwd,
-                    &FxHashMap::default(),
-                );
+                let mut cmd =
+                    toolchain::command(&runnable.program, &runnable.cwd, &FxHashMap::default());
 
                 cmd.args(runnable.args.iter());
 

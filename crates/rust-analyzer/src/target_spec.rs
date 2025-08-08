@@ -107,9 +107,7 @@ impl ProjectJsonTargetSpec {
 
                     runnable
                 }),
-            RunnableKind::Bench { .. } => {
-                None
-            }
+            RunnableKind::Bench { .. } => None,
             RunnableKind::DocTest { test_id } => self
                 .shell_runnables
                 .get(&project_model::project_json::RunnableKind::DocTest)
@@ -118,7 +116,7 @@ impl ProjectJsonTargetSpec {
                     runnable.args.iter_mut().for_each(|arg| {
                         *arg = arg
                             .replace("{label}", &self.label)
-                            .replace("{test_id}", test_id.as_ref());
+                            .replace("{test_id}", test_id.as_str());
                     });
 
                     runnable
