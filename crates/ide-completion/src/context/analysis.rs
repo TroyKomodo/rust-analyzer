@@ -559,7 +559,7 @@ fn expected_type_and_name<'db>(
     token: &SyntaxToken,
     name_like: &ast::NameLike,
 ) -> (Option<Type<'db>>, Option<NameOrNameRef>) {
-    let token = prev_assign_token_at_trivia(token.clone());
+    let token = prev_special_biased_token_at_trivia(token.clone());
     let mut node = match token.parent() {
         Some(it) => it,
         None => return (None, None),
@@ -723,6 +723,18 @@ fn expected_type_and_name<'db>(
                     cov_mark::hit!(expected_type_fn_ret_without_leading_char);
                     let def = sema.to_def(&it);
                     (def.map(|def| def.ret_type(sema.db)), None)
+                },
+                ast::ReturnExpr(it) => {
+                    let fn_ = sema.ancestors_with_macros(it.syntax().clone())
+                        .find_map(Either::<ast::Fn, ast::ClosureExpr>::cast);
+                    let ty = fn_.and_then(|f| match f {
+                        Either::Left(f) => Some(sema.to_def(&f)?.ret_type(sema.db)),
+                        Either::Right(f) => {
+                            let ty = sema.type_of_expr(&f.into())?.original.as_callable(sema.db)?;
+                            Some(ty.return_type())
+                        },
+                    });
+                    (ty, None)
                 },
                 ast::ClosureExpr(it) => {
                     let ty = sema.type_of_expr(&it.into());
@@ -943,9 +955,14 @@ fn classify_name_ref<'db>(
             };
             let prev_sibling = non_trivia_sibling(node.into(), Direction::Prev)?.into_node()?;
 
-            ast::ExprStmt::cast(prev_sibling.clone())
-                .and_then(|it| it.expr())
-                .or_else(|| ast::Expr::cast(prev_sibling))
+            match_ast! {
+                match prev_sibling {
+                    ast::ExprStmt(stmt) => stmt.expr().filter(|_| stmt.semicolon_token().is_none()),
+                    ast::LetStmt(stmt) => stmt.initializer().filter(|_| stmt.semicolon_token().is_none()),
+                    ast::Expr(expr) => Some(expr),
+                    _ => None,
+                }
+            }
         })();
         matches!(prev_expr, Some(ast::Expr::IfExpr(_)))
     };
@@ -1036,9 +1053,6 @@ fn classify_name_ref<'db>(
                                             in_trait = Some(trait_);
                                             sema.source(trait_)?.value.generic_param_list()
                                         }
-                                    }
-                                    hir::ModuleDef::TraitAlias(trait_) => {
-                                        sema.source(trait_)?.value.generic_param_list()
                                     }
                                     hir::ModuleDef::TypeAlias(ty_) => {
                                         sema.source(ty_)?.value.generic_param_list()
@@ -1174,19 +1188,23 @@ fn classify_name_ref<'db>(
         Some(res)
     };
 
-    let is_in_condition = |it: &ast::Expr| {
+    fn is_in_condition(it: &ast::Expr) -> bool {
         (|| {
             let parent = it.syntax().parent()?;
             if let Some(expr) = ast::WhileExpr::cast(parent.clone()) {
                 Some(expr.condition()? == *it)
-            } else if let Some(expr) = ast::IfExpr::cast(parent) {
+            } else if let Some(expr) = ast::IfExpr::cast(parent.clone()) {
                 Some(expr.condition()? == *it)
+            } else if let Some(expr) = ast::BinExpr::cast(parent)
+                && expr.op_token()?.kind() == T![&&]
+            {
+                Some(is_in_condition(&expr.into()))
             } else {
                 None
             }
         })()
         .unwrap_or(false)
-    };
+    }
 
     let make_path_kind_expr = |expr: ast::Expr| {
         let it = expr.syntax();
@@ -1251,6 +1269,7 @@ fn classify_name_ref<'db>(
             .parent()
             .and_then(ast::LetStmt::cast)
             .is_some_and(|it| it.semicolon_token().is_none());
+        let in_value = it.parent().and_then(Either::<ast::LetStmt, ast::ArgList>::cast).is_some();
         let impl_ = fetch_immediate_impl(sema, original_file, expr.syntax());
 
         let in_match_guard = match it.parent().and_then(ast::MatchArm::cast) {
@@ -1271,6 +1290,7 @@ fn classify_name_ref<'db>(
                 is_func_update,
                 innermost_ret_ty,
                 self_param,
+                in_value,
                 incomplete_let,
                 impl_,
                 in_match_guard,
@@ -1869,7 +1889,7 @@ fn next_non_trivia_sibling(ele: SyntaxElement) -> Option<SyntaxElement> {
     None
 }
 
-fn prev_assign_token_at_trivia(mut token: SyntaxToken) -> SyntaxToken {
+fn prev_special_biased_token_at_trivia(mut token: SyntaxToken) -> SyntaxToken {
     while token.kind().is_trivia()
         && let Some(prev) = token.prev_token()
         && let T![=]
@@ -1882,7 +1902,10 @@ fn prev_assign_token_at_trivia(mut token: SyntaxToken) -> SyntaxToken {
         | T![-=]
         | T![|=]
         | T![&=]
-        | T![^=] = prev.kind()
+        | T![^=]
+        | T![return]
+        | T![break]
+        | T![continue] = prev.kind()
     {
         token = prev
     }
